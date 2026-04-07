@@ -15,6 +15,9 @@ const {
 } = require('../utils/aps');
 
 const router = express.Router();
+const MAX_POLL_ATTEMPTS = 60;
+const POLL_INTERVAL_MS = 5000;
+
 const upload = multer({
   dest: 'uploads/',
   limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
@@ -30,134 +33,167 @@ const upload = multer({
 // In-memory job store (use Redis/DB in production)
 const jobs = new Map();
 
+function createJobId() {
+  return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getJobContext(file) {
+  const jobId = createJobId();
+  return {
+    jobId,
+    originalName: file.originalname.replace(/\.dwg$/i, ''),
+    inputKey: `input_${jobId}.dwg`,
+    outputKey: `output_${jobId}.pdf`,
+    bucketKey: process.env.OSS_BUCKET_KEY,
+    tempFilePath: file.path,
+  };
+}
+
+function setJob(jobId, state) {
+  jobs.set(jobId, state);
+}
+
+function updateJob(jobId, patch) {
+  jobs.set(jobId, { ...jobs.get(jobId), ...patch });
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function prepareStorage(token, context) {
+  const { jobId, bucketKey, inputKey, tempFilePath } = context;
+
+  setJob(jobId, { status: 'uploading', progress: 20, message: 'Setting up storage...' });
+  await ensureBucket(token, bucketKey);
+
+  setJob(jobId, { status: 'uploading', progress: 35, message: 'Uploading DWG to cloud storage...' });
+  await uploadObject(token, bucketKey, inputKey, tempFilePath);
+
+  return getSignedDownloadUrl(token, bucketKey, inputKey);
+}
+
+async function prepareOutput(token, context) {
+  const { bucketKey, outputKey } = context;
+  return getSignedUploadUrl(token, bucketKey, outputKey);
+}
+
+async function startWorkItem(token, context, inputUrl, outputUrl) {
+  setJob(context.jobId, {
+    status: 'processing',
+    progress: 50,
+    message: 'Starting AutoCAD conversion engine...',
+  });
+
+  const workItemId = await submitWorkItem(token, inputUrl, outputUrl);
+
+  setJob(context.jobId, {
+    status: 'processing',
+    progress: 60,
+    message: 'AutoCAD is rendering your drawing...',
+    workItemId,
+  });
+
+  return workItemId;
+}
+
+async function finalizeSuccess(token, context, uploadKey, workItemId, reportUrl) {
+  const { jobId, bucketKey, outputKey, originalName } = context;
+  await completeUpload(token, bucketKey, outputKey, uploadKey).catch(() => {});
+  const downloadUrl = await getSignedDownloadUrl(token, bucketKey, outputKey);
+
+  setJob(jobId, {
+    status: 'complete',
+    progress: 100,
+    message: 'Conversion complete!',
+    downloadUrl,
+    fileName: `${originalName}.pdf`,
+    workItemId,
+    reportUrl,
+  });
+}
+
+function finalizeFailure(jobId, wiStatus) {
+  setJob(jobId, {
+    status: 'error',
+    progress: 0,
+    message: `Conversion failed: ${wiStatus.status}`,
+    reportUrl: wiStatus.reportUrl,
+  });
+}
+
+async function pollWorkItem(token, context, workItemId, uploadKey) {
+  let attempts = 0;
+
+  while (attempts < MAX_POLL_ATTEMPTS) {
+    await wait(POLL_INTERVAL_MS);
+    const wiStatus = await getWorkItemStatus(token, workItemId);
+    attempts++;
+
+    const progressMap = { pending: 62, inprogress: 75 };
+    const progressBase = progressMap[wiStatus.status] || 75;
+
+    updateJob(context.jobId, {
+      progress: progressBase + Math.min(attempts * 2, 15),
+      message: `Processing... (${wiStatus.status})`,
+      workItemId,
+    });
+
+    if (wiStatus.status === 'success') {
+      await finalizeSuccess(token, context, uploadKey, workItemId, wiStatus.reportUrl);
+      return;
+    }
+
+    if (wiStatus.status === 'failed' || wiStatus.status === 'cancelled') {
+      finalizeFailure(context.jobId, wiStatus);
+      return;
+    }
+  }
+
+  setJob(context.jobId, {
+    status: 'error',
+    progress: 0,
+    message: 'Conversion timed out after 5 minutes',
+  });
+}
+
+async function runConversion(context) {
+  const token = await getAccessToken();
+  const inputUrl = await prepareStorage(token, context);
+  const { uploadUrl: outputUrl, uploadKey } = await prepareOutput(token, context);
+  const workItemId = await startWorkItem(token, context, inputUrl, outputUrl);
+  await pollWorkItem(token, context, workItemId, uploadKey);
+}
+
+function handleConversionError(jobId, err) {
+  console.error(`[${jobId}] Conversion failed:`, err.response?.data || err.message);
+  setJob(jobId, {
+    status: 'error',
+    progress: 0,
+    message: err.response?.data?.developerMessage || err.response?.data?.message || err.message,
+  });
+}
+
 // POST /api/convert  — Upload DWG and start conversion
 router.post('/convert', upload.single('dwgFile'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No DWG file uploaded' });
   }
 
-  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const originalName = req.file.originalname.replace(/\.dwg$/i, '');
-  const inputKey = `input_${jobId}.dwg`;
-  const outputKey = `output_${jobId}.pdf`;
-  const bucketKey = process.env.OSS_BUCKET_KEY;
+  const context = getJobContext(req.file);
 
   // Start async job
-  jobs.set(jobId, { status: 'uploading', progress: 10, message: 'Uploading DWG file...' });
-  res.json({ jobId });
+  setJob(context.jobId, { status: 'uploading', progress: 10, message: 'Uploading DWG file...' });
+  res.json({ jobId: context.jobId });
 
   // Run conversion pipeline asynchronously
   ;(async () => {
-    let currentStep = 'initializing';
     try {
-      currentStep = 'getAccessToken';
-      console.log(`[${jobId}] Step: ${currentStep}`);
-      const token = await getAccessToken();
-      console.log(`[${jobId}] Step complete: ${currentStep}`);
-
-      // 1. Ensure bucket exists
-      jobs.set(jobId, { status: 'uploading', progress: 20, message: 'Setting up storage...' });
-      currentStep = 'ensureBucket';
-      console.log(`[${jobId}] Step: ${currentStep} (${bucketKey})`);
-      await ensureBucket(token, bucketKey);
-      console.log(`[${jobId}] Step complete: ${currentStep}`);
-
-      // 2. Upload DWG to OSS
-      jobs.set(jobId, { status: 'uploading', progress: 35, message: 'Uploading DWG to cloud storage...' });
-      currentStep = 'uploadObject';
-      console.log(`[${jobId}] Step: ${currentStep} (${inputKey})`);
-      await uploadObject(token, bucketKey, inputKey, req.file.path);
-      console.log(`[${jobId}] Step complete: ${currentStep}`);
-
-      // 3. Get signed read URL for input
-      currentStep = 'getSignedDownloadUrl(input)';
-      console.log(`[${jobId}] Step: ${currentStep}`);
-      const inputUrl = await getSignedDownloadUrl(token, bucketKey, inputKey);
-      console.log(`[${jobId}] Step complete: ${currentStep}`);
-
-      // 4. Get signed write URL for output
-      currentStep = 'getSignedUploadUrl(output)';
-      console.log(`[${jobId}] Step: ${currentStep} (${outputKey})`);
-      const { uploadUrl: outputUrl, uploadKey } = await getSignedUploadUrl(token, bucketKey, outputKey);
-      console.log(`[${jobId}] Step complete: ${currentStep}`);
-
-      // 5. Submit Design Automation WorkItem
-      jobs.set(jobId, { status: 'processing', progress: 50, message: 'Starting AutoCAD conversion engine...' });
-      currentStep = 'submitWorkItem';
-      console.log(`[${jobId}] Step: ${currentStep}`);
-      const workItemId = await submitWorkItem(token, inputUrl, outputUrl);
-      console.log(`[${jobId}] Step complete: ${currentStep} (${workItemId})`);
-      jobs.set(jobId, {
-        status: 'processing',
-        progress: 60,
-        message: 'AutoCAD is rendering your drawing...',
-        workItemId,
-      });
-
-      // 6. Poll until done
-      let attempts = 0;
-      const maxAttempts = 60; // 5 min max
-      while (attempts < maxAttempts) {
-        await new Promise(r => setTimeout(r, 5000)); // wait 5s
-        const wiStatus = await getWorkItemStatus(token, workItemId);
-        attempts++;
-
-        const progressMap = { pending: 62, inprogress: 75 };
-        const prog = progressMap[wiStatus.status] || 75;
-
-        jobs.set(jobId, {
-          ...jobs.get(jobId),
-          progress: prog + Math.min(attempts * 2, 15),
-          message: `Processing... (${wiStatus.status})`,
-          workItemId,
-        });
-
-        if (wiStatus.status === 'success') {
-          // Complete the output upload record
-          await completeUpload(token, bucketKey, outputKey, uploadKey).catch(() => {});
-          // Get download URL for the PDF
-          const downloadUrl = await getSignedDownloadUrl(token, bucketKey, outputKey);
-          jobs.set(jobId, {
-            status: 'complete',
-            progress: 100,
-            message: 'Conversion complete!',
-            downloadUrl,
-            fileName: `${originalName}.pdf`,
-            workItemId,
-            reportUrl: wiStatus.reportUrl,
-          });
-          break;
-        }
-
-        if (wiStatus.status === 'failed' || wiStatus.status === 'cancelled') {
-          jobs.set(jobId, {
-            status: 'error',
-            progress: 0,
-            message: `Conversion failed: ${wiStatus.status}`,
-            reportUrl: wiStatus.reportUrl,
-          });
-          break;
-        }
-      }
-
-      if (attempts >= maxAttempts) {
-        jobs.set(jobId, { status: 'error', progress: 0, message: 'Conversion timed out after 5 minutes' });
-      }
+      await runConversion(context);
     } catch (err) {
-      console.error(`[${jobId}] Conversion failed at step: ${currentStep}`);
-      console.error(`[${jobId}] Conversion error:`, err.response?.data || err.message);
-      if (err.response) {
-        console.error(`[${jobId}] HTTP status:`, err.response.status);
-        console.error(`[${jobId}] Response headers:`, err.response.headers);
-      }
-      jobs.set(jobId, {
-        status: 'error',
-        progress: 0,
-        message: err.response?.data?.developerMessage || err.response?.data?.message || err.message,
-      });
+      handleConversionError(context.jobId, err);
     } finally {
-      // Clean up temp upload
-      fs.unlink(req.file.path, () => {});
+      fs.unlink(context.tempFilePath, () => {});
     }
   })();
 });

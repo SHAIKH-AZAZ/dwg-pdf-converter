@@ -1,20 +1,25 @@
 // utils/aps.js  — APS authentication & OSS helpers
 const axios = require('axios');
-const FormData = require('form-data');
 const fs = require('fs');
 
 const APS_BASE = 'https://developer.api.autodesk.com';
+const DA_BASE = `${APS_BASE}/da/us-east/v3`;
+const MD_BASE = `${APS_BASE}/modelderivative/v2/designdata`;
+const INTERNAL_SCOPES = 'data:read data:write data:create bucket:create bucket:read code:all';
+const VIEWER_SCOPES = 'viewables:read';
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
-let _tokenCache = null;
+const tokenCache = new Map();
 
-async function getAccessToken() {
-  if (_tokenCache && _tokenCache.expires_at > Date.now() + 60_000) {
-    return _tokenCache.access_token;
+async function requestToken(scope) {
+  const cached = tokenCache.get(scope);
+  if (cached && cached.expires_at > Date.now() + 60_000) {
+    return cached;
   }
+
   const params = new URLSearchParams({
     grant_type: 'client_credentials',
-    scope: 'data:read data:write data:create bucket:create bucket:read code:all',
+    scope,
   });
   const res = await axios.post(`${APS_BASE}/authentication/v2/token`, params, {
     auth: {
@@ -23,11 +28,24 @@ async function getAccessToken() {
     },
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   });
-  _tokenCache = {
+
+  const token = {
     access_token: res.data.access_token,
+    expires_in: res.data.expires_in,
     expires_at: Date.now() + res.data.expires_in * 1000,
   };
-  return _tokenCache.access_token;
+
+  tokenCache.set(scope, token);
+  return token;
+}
+
+async function getAccessToken(scopes = INTERNAL_SCOPES) {
+  const token = await requestToken(scopes);
+  return token.access_token;
+}
+
+async function getViewerToken() {
+  return requestToken(VIEWER_SCOPES);
 }
 
 // ─── OSS Bucket ──────────────────────────────────────────────────────────────
@@ -36,7 +54,6 @@ async function ensureBucket(token, bucketKey) {
     await axios.get(`${APS_BASE}/oss/v2/buckets/${bucketKey}/details`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    console.log(`✅ Bucket exists: ${bucketKey}`);
   } catch (err) {
     if (err.response?.status === 404) {
       await axios.post(
@@ -44,7 +61,6 @@ async function ensureBucket(token, bucketKey) {
         { bucketKey, policyKey: 'transient' },
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
       );
-      console.log(`🪣 Bucket created: ${bucketKey}`);
     } else {
       throw err;
     }
@@ -108,9 +124,48 @@ async function completeUpload(token, bucketKey, objectKey, uploadKey) {
   );
 }
 
-// ─── Design Automation ───────────────────────────────────────────────────────
-const DA_BASE = `${APS_BASE}/da/us-east/v3`;
+function urnify(objectId) {
+  return Buffer.from(objectId).toString('base64').replace(/=/g, '');
+}
 
+async function submitTranslation(token, urn) {
+  const body = {
+    input: { urn },
+    output: {
+      formats: [
+        {
+          type: 'svf',
+          views: ['2d', '3d'],
+        },
+      ],
+    },
+  };
+
+  const res = await axios.post(`${MD_BASE}/job`, body, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  });
+
+  return res.data;
+}
+
+async function getManifest(token, urn) {
+  try {
+    const res = await axios.get(`${MD_BASE}/${encodeURIComponent(urn)}/manifest`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.data;
+  } catch (err) {
+    if (err.response?.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+// ─── Design Automation ───────────────────────────────────────────────────────
 async function submitWorkItem(token, inputUrl, outputUrl) {
   const body = {
     activityId: 'AutoCAD.PlotToPDF+prod',
@@ -126,8 +181,6 @@ async function submitWorkItem(token, inputUrl, outputUrl) {
       },
     },
   };
-
-  console.log('[APS] submitWorkItem activityId:', body.activityId);
 
   const res = await axios.post(`${DA_BASE}/workitems`, body, {
     headers: {
@@ -147,11 +200,15 @@ async function getWorkItemStatus(token, workItemId) {
 
 module.exports = {
   getAccessToken,
+  getViewerToken,
   ensureBucket,
   uploadObject,
   getSignedDownloadUrl,
   getSignedUploadUrl,
   completeUpload,
+  urnify,
+  submitTranslation,
+  getManifest,
   submitWorkItem,
   getWorkItemStatus,
 };

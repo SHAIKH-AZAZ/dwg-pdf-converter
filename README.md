@@ -60,21 +60,21 @@ npm start
 
 ```
 Browser                 Server                    APS Cloud
-  │                       │                           │
-  │──POST /api/convert────▶│                           │
-  │  (DWG file upload)     │──GET token (OAuth 2-leg)─▶│
-  │                        │──Ensure OSS bucket────────▶│
-  │◀──{ jobId }────────────│──Upload DWG to OSS────────▶│
-  │                        │──Get signed read URL───────▶│
-  │                        │──Get signed write URL──────▶│
-  │                        │──POST /v3/workitems────────▶│
-  │                        │  activityId:               │
-  │                        │  AutoCAD.PlotToPDF+prod     │
-  │──GET /api/status/id───▶│  (polling every 5s)        │
-  │◀──{ status, progress }─│◀──WorkItem complete────────│
-  │                        │──Get signed download URL───▶│
-  │◀──{ downloadUrl }──────│                            │
-  │                        │                            │
+  │                         │                               │
+  │──POST /api/convert────▶ │                               │
+  │  (DWG file upload)      │──GET token (OAuth 2-leg)─────▶│
+  │                         │──Ensure OSS bucket───────────▶│
+  │◀──{ jobId }──────────── │──Upload DWG to OSS───────────▶│
+  │                         │──Get signed read URL─────────▶│
+  │                         │──Get signed write URL──────▶  │
+  │                         │──POST /v3/workitems────────▶  │
+  │                         │  activityId:                  │
+  │                         │  AutoCAD.PlotToPDF+prod       │
+  │──GET /api/status/id───▶ │  (polling every 5s)           │
+  │◀──{ status, progress }─ │◀──WorkItem complete────────   │
+  │                         │──Get signed download URL───▶  │
+  │◀──{ downloadUrl }────── │                               │
+  │                         │                               │
   ▼ User downloads PDF
 ```
 
