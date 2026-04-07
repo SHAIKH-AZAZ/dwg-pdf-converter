@@ -33,7 +33,7 @@ npm install
 
 ### 2. Configure your `.env`
 ```
-APS_CLIENT_ID=gQ6GoTAJ9sUdebgN2cOnNCRKD4HGQq7KQhfJHflUHuuHwWt3
+APS_CLIENT_ID=<CLIENT ID FROM APS >
 APS_CLIENT_SECRET=<your_client_secret>
 OSS_BUCKET_KEY=dwgpdf-bucket-<any-unique-suffix>
 PORT=3000
