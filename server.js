@@ -12,6 +12,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Routes
 app.use('/api', require('./routes/convert'));
+app.use('/api/viewer', require('./routes/viewer'));
 
 // Catch-all → serve index.html
 app.get('/*splat', (req, res) => {

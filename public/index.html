@@ -6,6 +6,7 @@
 <title>DWG → PDF · APS Converter</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css">
 <style>
   :root {
     --bg: #0a0c10;
@@ -279,6 +280,8 @@
   /* Convert button */
   .card-footer {
     padding: 0 24px 24px;
+    display: grid;
+    gap: 12px;
   }
 
   .btn-convert {
@@ -315,6 +318,38 @@
   .btn-convert.loading .btn-text { display: none; }
   .btn-convert.loading .spinner { display: block; }
 
+  .btn-preview {
+    width: 100%;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.15s, border-color 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn-preview:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); border-color: var(--accent); }
+  .btn-preview:active:not(:disabled) { transform: translateY(0); }
+  .btn-preview:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-preview .spinner {
+    display: none;
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    margin: 0 auto;
+  }
+  .btn-preview.loading .btn-text { display: none; }
+  .btn-preview.loading .spinner { display: block; }
+
   /* Progress panel */
   .progress-panel {
     display: none;
@@ -325,6 +360,16 @@
   }
 
   .progress-panel.visible { display: flex; }
+
+  .preview-panel {
+    display: none;
+    padding: 24px;
+    border-top: 1px solid var(--border);
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .preview-panel.visible { display: flex; }
 
   .progress-header {
     display: flex;
@@ -419,6 +464,89 @@
   }
 
   .download-card.visible { display: flex; }
+
+  .viewer-card {
+    width: 100%;
+    max-width: 960px;
+    min-height: 620px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  .viewer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .viewer-title {
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .viewer-sub {
+    margin-top: 4px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .viewer-badge {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .viewer-shell {
+    padding: 20px 24px 24px;
+  }
+
+  .viewer-stage {
+    position: relative;
+    min-height: 520px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: #0d1016;
+  }
+
+  #viewer {
+    width: 100%;
+    height: 520px;
+  }
+
+  .viewer-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px;
+    color: var(--muted);
+    text-align: center;
+    background: linear-gradient(180deg, rgba(18,21,28,0.25), rgba(18,21,28,0.75));
+    pointer-events: none;
+  }
+
+  .viewer-empty.hidden { display: none; }
+
+  .viewer-note {
+    margin-top: 14px;
+    font-size: 13px;
+    color: var(--muted);
+  }
 
   .dl-icon {
     width: 52px; height: 52px;
@@ -540,6 +668,7 @@
     .drop-zone { padding: 36px 20px; }
     .info-strip { flex-direction: column; }
     .download-card { flex-wrap: wrap; }
+    .viewer-header { flex-direction: column; align-items: flex-start; }
   }
 </style>
 </head>
@@ -606,11 +735,56 @@
       </div>
     </div>
 
+    <div class="preview-panel" id="previewPanel">
+      <div class="progress-header">
+        <span class="progress-status status-uploading" id="previewStatus">UPLOADING</span>
+        <span class="progress-pct" id="previewPct">0%</span>
+      </div>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="previewBar"></div>
+      </div>
+      <div class="progress-msg" id="previewMsg">Preparing preview...</div>
+      <div class="steps">
+        <div class="step" id="previewStep1"><div class="step-dot"></div>Upload DWG for preview</div>
+        <div class="step" id="previewStep2"><div class="step-dot"></div>Submit Model Derivative job</div>
+        <div class="step" id="previewStep3"><div class="step-dot"></div>Translate viewer geometry</div>
+        <div class="step" id="previewStep4"><div class="step-dot"></div>Load Autodesk Viewer</div>
+      </div>
+    </div>
+
     <div class="card-footer">
+      <button class="btn-preview" id="btnPreview" disabled>
+        <span class="btn-text">Preview DWG</span>
+        <div class="spinner"></div>
+      </button>
       <button class="btn-convert" id="btnConvert" disabled>
         <span class="btn-text">Convert to PDF</span>
         <div class="spinner"></div>
       </button>
+    </div>
+  </div>
+
+  <div class="viewer-card">
+    <div class="viewer-header">
+      <div>
+        <div class="viewer-title">DWG Preview</div>
+        <div class="viewer-sub" id="viewerFileName">No file selected</div>
+      </div>
+      <div class="viewer-badge" id="viewerBadge">IDLE</div>
+    </div>
+    <div class="viewer-shell">
+      <div class="viewer-stage">
+        <div id="viewer"></div>
+        <div class="viewer-empty" id="viewerEmpty">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5">
+            <path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/>
+            <path d="M12 3v18"/>
+            <path d="M4 7.5 12 12l8-4.5"/>
+          </svg>
+          <div>Run Preview to upload the DWG, translate it with Model Derivative, and load Autodesk Viewer.</div>
+        </div>
+      </div>
+      <div class="viewer-note" id="viewerNote">Viewer is inactive until a preview job completes.</div>
     </div>
   </div>
 
@@ -676,164 +850,7 @@
   </div>
 </main>
 
-<script>
-const fileInput = document.getElementById('fileInput');
-const dropZone = document.getElementById('dropZone');
-const fileInfo = document.getElementById('fileInfo');
-const fileName = document.getElementById('fileName');
-const fileSize = document.getElementById('fileSize');
-const btnRemove = document.getElementById('btnRemove');
-const btnConvert = document.getElementById('btnConvert');
-const progressPanel = document.getElementById('progressPanel');
-const progressStatus = document.getElementById('progressStatus');
-const progressPct = document.getElementById('progressPct');
-const progressBar = document.getElementById('progressBar');
-const progressMsg = document.getElementById('progressMsg');
-const downloadCard = document.getElementById('downloadCard');
-const dlFileName = document.getElementById('dlFileName');
-const btnDownload = document.getElementById('btnDownload');
-const btnNew = document.getElementById('btnNew');
-const errorBox = document.getElementById('errorBox');
-const errorText = document.getElementById('errorText');
-const errorSub = document.getElementById('errorSub');
-
-let selectedFile = null;
-let pollInterval = null;
-
-function formatBytes(b) {
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-  return (b / 1048576).toFixed(1) + ' MB';
-}
-
-function setFile(file) {
-  selectedFile = file;
-  fileName.textContent = file.name;
-  fileSize.textContent = formatBytes(file.size);
-  fileInfo.classList.add('visible');
-  btnConvert.disabled = false;
-  hideError();
-}
-
-function clearFile() {
-  selectedFile = null;
-  fileInput.value = '';
-  fileInfo.classList.remove('visible');
-  btnConvert.disabled = true;
-}
-
-fileInput.addEventListener('change', e => {
-  if (e.target.files[0]) setFile(e.target.files[0]);
-});
-
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  const f = e.dataTransfer.files[0];
-  if (f && f.name.toLowerCase().endsWith('.dwg')) setFile(f);
-  else showError('Only .dwg files are supported.', '');
-});
-
-btnRemove.addEventListener('click', clearFile);
-
-function setStep(n) {
-  for (let i = 1; i <= 4; i++) {
-    const el = document.getElementById(`step${i}`);
-    el.className = 'step' + (i < n ? ' done' : i === n ? ' active' : '');
-  }
-}
-
-function showError(msg, sub) {
-  errorText.textContent = msg;
-  errorSub.textContent = sub;
-  errorBox.classList.add('visible');
-}
-
-function hideError() { errorBox.classList.remove('visible'); }
-
-function updateProgress(data) {
-  progressPct.textContent = data.progress + '%';
-  progressBar.style.width = data.progress + '%';
-  progressMsg.textContent = data.message;
-
-  const statusEl = progressStatus;
-  statusEl.className = 'progress-status status-' + data.status;
-  statusEl.textContent = data.status.toUpperCase();
-
-  if (data.progress < 40) setStep(1);
-  else if (data.progress < 60) setStep(2);
-  else if (data.progress < 95) setStep(3);
-  else setStep(4);
-}
-
-btnConvert.addEventListener('click', async () => {
-  if (!selectedFile) return;
-
-  // Reset UI
-  hideError();
-  downloadCard.classList.remove('visible');
-  progressPanel.classList.add('visible');
-  btnConvert.classList.add('loading');
-  btnConvert.disabled = true;
-  updateProgress({ status: 'uploading', progress: 5, message: 'Starting upload...' });
-  setStep(1);
-
-  const fd = new FormData();
-  fd.append('dwgFile', selectedFile);
-
-  try {
-    const res = await fetch('/api/convert', { method: 'POST', body: fd });
-    const data = await res.json();
-
-    if (!res.ok || !data.jobId) {
-      throw new Error(data.error || 'Upload failed');
-    }
-
-    // Poll status
-    pollInterval = setInterval(async () => {
-      try {
-        const sr = await fetch(`/api/status/${data.jobId}`);
-        const status = await sr.json();
-        updateProgress(status);
-
-        if (status.status === 'complete') {
-          clearInterval(pollInterval);
-          btnConvert.classList.remove('loading');
-          progressPanel.classList.remove('visible');
-          downloadCard.classList.add('visible');
-          dlFileName.textContent = status.fileName || 'result.pdf';
-          btnDownload.href = status.downloadUrl;
-          btnDownload.download = status.fileName || 'result.pdf';
-        } else if (status.status === 'error') {
-          clearInterval(pollInterval);
-          btnConvert.classList.remove('loading');
-          btnConvert.disabled = false;
-          progressPanel.classList.remove('visible');
-          showError('Conversion failed', status.message);
-        }
-      } catch (e) {
-        // ignore poll errors, retry next tick
-      }
-    }, 3000);
-  } catch (err) {
-    btnConvert.classList.remove('loading');
-    btnConvert.disabled = false;
-    progressPanel.classList.remove('visible');
-    showError(err.message, 'Check your network or server logs.');
-  }
-});
-
-btnNew.addEventListener('click', () => {
-  downloadCard.classList.remove('visible');
-  progressPanel.classList.remove('visible');
-  clearFile();
-  hideError();
-  if (pollInterval) clearInterval(pollInterval);
-  btnConvert.classList.remove('loading');
-  btnConvert.disabled = true;
-});
-</script>
+<script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>
