@@ -3,9 +3,11 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
 const {
   getAccessToken,
   ensureBucket,
+  listBucketObjects,
   uploadObject,
   getSignedDownloadUrl,
   getSignedUploadUrl,
@@ -203,6 +205,47 @@ router.get('/status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   res.json(job);
+});
+
+// GET /api/download/:jobId  — Stream completed PDF through same-origin endpoint
+router.get('/download/:jobId', async (req, res, next) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  if (job.status !== 'complete' || !job.downloadUrl) {
+    return res.status(409).json({ error: 'PDF is not ready for download yet' });
+  }
+
+  try {
+    const fileResponse = await axios.get(job.downloadUrl, { responseType: 'stream' });
+    res.setHeader('Content-Type', fileResponse.headers['content-type'] || 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${job.fileName || 'result.pdf'}"`);
+    fileResponse.data.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/uploaded-drawings — List all DWG files uploaded to OSS
+router.get('/uploaded-drawings', async (req, res, next) => {
+  try {
+    const token = await getAccessToken();
+    const bucketKey = process.env.OSS_BUCKET_KEY;
+
+    const objects = await listBucketObjects(token, bucketKey, 'input_');
+
+    const drawings = objects.map(obj => ({
+      fileName: obj.objectKey,
+      size: obj.size,
+      uploadedAt: obj.lastModified,
+    }));
+
+    res.json({ total: drawings.length, drawings });
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;

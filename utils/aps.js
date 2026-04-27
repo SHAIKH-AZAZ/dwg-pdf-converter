@@ -67,6 +67,23 @@ async function ensureBucket(token, bucketKey) {
   }
 }
 
+// ─── List objects in OSS bucket ───────────────────────────────────────────────
+async function listBucketObjects(token, bucketKey, prefix = '') {
+  try {
+    const res = await axios.get(
+      `${APS_BASE}/oss/v2/buckets/${bucketKey}/objects`,
+      {
+        params: { limit: 100, prefix },
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    return res.data.items || [];
+  } catch (err) {
+    console.error('Error listing bucket objects:', err.response?.data || err.message);
+    throw err;
+  }
+}
+
 // ─── Upload object to OSS ─────────────────────────────────────────────────────
 async function uploadObject(token, bucketKey, objectKey, filePath) {
   const fileBuffer = fs.readFileSync(filePath);
@@ -202,6 +219,7 @@ module.exports = {
   getAccessToken,
   getViewerToken,
   ensureBucket,
+  listBucketObjects,
   uploadObject,
   getSignedDownloadUrl,
   getSignedUploadUrl,

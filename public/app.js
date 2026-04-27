@@ -27,6 +27,9 @@ const viewerFileName = document.getElementById('viewerFileName');
 const viewerBadge = document.getElementById('viewerBadge');
 const viewerEmpty = document.getElementById('viewerEmpty');
 const viewerNote = document.getElementById('viewerNote');
+const uploadsCard = document.getElementById('uploadsCard');
+const uploadsList = document.getElementById('uploadsList');
+const btnRefreshUploads = document.getElementById('btnRefreshUploads');
 
 let selectedFile = null;
 let convertPollInterval = null;
@@ -38,6 +41,38 @@ function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+async function loadUploadedDrawings() {
+  try {
+    const response = await fetch('/api/uploaded-drawings');
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to load uploads');
+    }
+
+    if (!data.drawings || data.drawings.length === 0) {
+      uploadsList.innerHTML = '<div style="text-align: center; color: var(--muted); padding: 20px; font-size: 13px;">No drawings uploaded yet</div>';
+      uploadsCard.style.display = 'none';
+      return;
+    }
+
+    uploadsCard.style.display = 'block';
+    uploadsList.innerHTML = data.drawings.map(drawing => {
+      const date = new Date(drawing.uploadedAt).toLocaleString();
+      const fileName = drawing.fileName.replace('input_', '').replace('.dwg', '');
+      return `
+        <div style="padding: 12px 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-size: 13px;">
+          <div style="flex: 1; min-width: 0;">
+            <div style="color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500;">${fileName}</div>
+            <div style="color: var(--muted); margin-top: 4px; font-size: 11px;">${date} · ${formatBytes(drawing.size)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    uploadsList.innerHTML = `<div style="color: var(--error); padding: 12px; font-size: 12px;">${err.message}</div>`;
+  }
 }
 
 function showError(message, detail) {
@@ -241,6 +276,7 @@ function pollPreview(jobId) {
         previewPanel.classList.remove('visible');
         setSteps('previewStep', 4);
         await loadViewerDocument(status.urn);
+        loadUploadedDrawings();
       } else if (status.status === 'error') {
         clearInterval(previewPollInterval);
         btnPreview.classList.remove('loading');
@@ -308,8 +344,9 @@ function pollConvert(jobId) {
         progressPanel.classList.remove('visible');
         downloadCard.classList.add('visible');
         dlFileName.textContent = status.fileName || 'result.pdf';
-        btnDownload.href = status.downloadUrl;
+        btnDownload.href = '/api/download/' + jobId;
         btnDownload.download = status.fileName || 'result.pdf';
+        loadUploadedDrawings();
       } else if (status.status === 'error') {
         clearInterval(convertPollInterval);
         btnConvert.classList.remove('loading');
@@ -356,8 +393,12 @@ dropZone.addEventListener('drop', event => {
 btnRemove.addEventListener('click', clearFile);
 btnPreview.addEventListener('click', startPreview);
 btnConvert.addEventListener('click', startConversion);
+btnRefreshUploads.addEventListener('click', loadUploadedDrawings);
 
 btnNew.addEventListener('click', () => {
   clearFile();
   hideError();
 });
+
+// Load uploads on page load
+window.addEventListener('load', loadUploadedDrawings);
